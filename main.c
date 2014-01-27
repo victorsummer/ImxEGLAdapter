@@ -1,6 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
 #include <unistd.h>
 #include <assert.h>
+#include <sys/select.h>
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -17,14 +20,31 @@ struct egl_device {
     const EGLint *attr_context;
 };
 
+void clock_gettime_diff(struct timespec *time_beg, struct timespec *time_end, struct timespec *diff)
+{
+    diff->tv_sec = time_end->tv_sec - time_beg->tv_sec;
+    diff->tv_nsec = time_end->tv_nsec - time_beg->tv_nsec;
+}
+
 /***************************************************************************************************
   X11 platform
 
 ***************************************************************************************************/
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
+
+#include <pthread.h>
+
+#define EGL_DEVICE_NAME     "Open GL ES 2"
+#define EGL_DEVICE_X        0
+#define EGL_DEVICE_Y        0
+#define EGL_DEVICE_WIDTH    1280
+#define EGL_DEVICE_HEIGHT   576
 
 int egl_platform_get_display_type(struct egl_device *device)
 {
+    XInitThreads();
+
     device->type = (EGLNativeDisplayType)XOpenDisplay(0);
     return 0;
 }
@@ -61,16 +81,13 @@ int egl_platform_create_window(struct egl_device *device)
     attr.colormap = XCreateColormap(device->type, root, visual_info->visual, AllocNone);
     attr.event_mask = StructureNotifyMask | ExposureMask | KeyPressMask;
 
-    int x = 0, y = 0, width = 1280, height = 576;
-    const char name[] = "Open GL ES 2.0";
-
     device->window = (EGLNativeWindowType)XCreateWindow(
         device->type,
         root,
         0,
         0,
-        width,
-        height,
+        EGL_DEVICE_WIDTH,
+        EGL_DEVICE_HEIGHT,
         0,
         visual_info->depth,
         InputOutput,
@@ -81,10 +98,10 @@ int egl_platform_create_window(struct egl_device *device)
     XFree(visual_info);
 
     XSizeHints size_hints;
-    size_hints.x = x;
-    size_hints.y = y;
-    size_hints.width  = width;
-    size_hints.height = height;
+    size_hints.x = EGL_DEVICE_X;
+    size_hints.y = EGL_DEVICE_Y;
+    size_hints.width  = EGL_DEVICE_WIDTH;
+    size_hints.height = EGL_DEVICE_HEIGHT;
     size_hints.flags = USSize | USPosition;
 
     XSetNormalHints(device->type, device->window, &size_hints);
@@ -92,8 +109,8 @@ int egl_platform_create_window(struct egl_device *device)
     XSetStandardProperties(
         device->type,
         device->window,
-        name,
-        name,
+        EGL_DEVICE_NAME,
+        EGL_DEVICE_NAME,
         None,
         (char **)NULL,
         0,
@@ -110,6 +127,102 @@ int egl_platform_destroy_window(struct egl_device *device)
     XCloseDisplay(device->type);
 
     return 0;
+}
+
+volatile int done = 0;
+
+static void *thread_start(void *arg)
+{
+    struct egl_device *device = (struct egl_device *)arg;
+
+    int x11_fd = ConnectionNumber(device->type);
+    fd_set in_fds;
+    struct timeval timer;
+
+    while (!done) {
+        FD_ZERO(&in_fds);
+        FD_SET(x11_fd, &in_fds);
+
+        timer.tv_usec = 0;
+        timer.tv_sec = 1;
+
+        select(x11_fd + 1, &in_fds, 0, 0, &timer);
+
+        while (XPending(device->type)) {
+            XEvent event;
+            XNextEvent(device->type, &event);
+            switch (event.type)
+            {
+                case Expose:
+                    // Redraw
+                    break;
+                case ConfigureNotify:
+                    glViewport(0, 0, (GLint)event.xconfigure.width, (GLint)event.xconfigure.height);
+                    break;
+                case KeyPress:
+                    {
+                        XLookupKeysym(&event.xkey, 0);
+                        char buf[10];
+                        XLookupString(&event.xkey, buf, sizeof(buf), 0, 0);
+                        if (buf[0] == 27)
+                            done = 1;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+    }
+
+    return 0;
+}
+
+void egl_platform_run(struct egl_device *device)
+{
+    system("setterm -cursor off");
+
+    pthread_t thread;
+    pthread_create(&thread, 0, &thread_start, (void *)device);
+
+    struct timespec time_beg, time_end, time_diff;
+
+    int d = 0;
+    float i = 0.0;
+
+    while (!done) {
+        clock_gettime(CLOCK_MONOTONIC, &time_beg);
+
+        glClearColor(i, i, i, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        eglSwapBuffers(device->display, device->surface);
+
+        clock_gettime(CLOCK_MONOTONIC, &time_end);
+        clock_gettime_diff(&time_beg, &time_end, &time_diff);
+
+        printf("%.3f fps      \r", 1 / (time_diff.tv_sec + time_diff.tv_nsec / 1000000000.0));
+
+        if (d)
+            i += 0.0001;
+        else
+            i -= 0.0001;
+
+        if (i > 1.0 || i < 0.0) {
+            if (i > 1.0)
+                i = 1.0;
+            if (i < 0.0)
+                i = 0.0;
+
+            d = !d;
+        }
+    }
+
+    printf("\n");
+
+    pthread_join(thread, 0);
+
+    system("setterm -cursor on");
 }
 
 /**************************************************************************************************/
@@ -192,16 +305,31 @@ int egl_uninitialize(struct egl_device *device)
     return 0;
 }
 
+void signal_handler(int signal)
+{
+}
+
 void egl_run(struct egl_device *device)
 {
-    sleep(3);
+    egl_platform_run(device);
 }
 
 int main(int argc, char *argv[])
 {
+    signal(SIGINT, &signal_handler);
+    signal(SIGTERM, &signal_handler);
+
     struct egl_device device;
     egl_initialize(&device);
+
+    printf(
+        "EGL vendor: %s\n"
+        "EGL version: %s\n",
+        eglQueryString(device.display, EGL_VENDOR),
+        eglQueryString(device.display, EGL_VERSION));
+
     egl_run(&device);
+
     egl_uninitialize(&device);
 
     return 0;
