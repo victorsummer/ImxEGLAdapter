@@ -3,6 +3,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <assert.h>
+#include <string.h>
+#include <time.h>
+#include <inttypes.h>
 #include <sys/select.h>
 
 #include <EGL/egl.h>
@@ -20,7 +23,10 @@ struct egl_device {
     const EGLint *attr_context;
 };
 
-void clock_gettime_diff(struct timespec *time_beg, struct timespec *time_end, struct timespec *diff)
+void clock_gettime_diff(
+    const struct timespec *time_beg,
+    const struct timespec *time_end,
+    struct timespec *diff)
 {
     diff->tv_sec = time_end->tv_sec - time_beg->tv_sec;
     diff->tv_nsec = time_end->tv_nsec - time_beg->tv_nsec;
@@ -185,37 +191,46 @@ void egl_platform_run(struct egl_device *device)
     pthread_t thread;
     pthread_create(&thread, 0, &thread_start, (void *)device);
 
-    struct timespec time_beg, time_end, time_diff;
-
     int d = 0;
     float i = 0.0;
 
+    struct timespec time_beg, time_end, time_diff, time_wait, time_sub;
+    clock_gettime(CLOCK_MONOTONIC, &time_beg);
+
     while (!done) {
-        clock_gettime(CLOCK_MONOTONIC, &time_beg);
+        {
+            glClearColor(i, i, i, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
 
-        glClearColor(i, i, i, 1);
-        glClear(GL_COLOR_BUFFER_BIT);
+            eglSwapBuffers(device->display, device->surface);
 
-        eglSwapBuffers(device->display, device->surface);
+            if (d)
+                i += 0.01;
+            else
+                i -= 0.01;
+
+            if (i > 1.0 || i < 0.0) {
+                if (i > 1.0)
+                    i = 1.0;
+                if (i < 0.0)
+                    i = 0.0;
+
+                d = !d;
+            }
+        }
 
         clock_gettime(CLOCK_MONOTONIC, &time_end);
         clock_gettime_diff(&time_beg, &time_end, &time_diff);
+        time_beg = time_end;
 
-        printf("%.3f fps      \r", 1 / (time_diff.tv_sec + time_diff.tv_nsec / 1000000000.0));
+        fprintf(stdout, "%.3Lf fps         \r", 1 / (time_diff.tv_sec + time_diff.tv_nsec / (long double)1000000000));
+        fflush(stdout);
 
-        if (d)
-            i += 0.0001;
-        else
-            i -= 0.0001;
-
-        if (i > 1.0 || i < 0.0) {
-            if (i > 1.0)
-                i = 1.0;
-            if (i < 0.0)
-                i = 0.0;
-
-            d = !d;
-        }
+        do {
+            clock_gettime(CLOCK_MONOTONIC, &time_wait);
+            clock_gettime_diff(&time_beg, &time_wait, &time_diff);
+            clock_gettime_diff(&time_end, &time_wait, &time_sub);
+        } while (time_diff.tv_sec * (uint64_t)1000000000 + time_diff.tv_nsec < 1 / 60.0 * ((uint64_t)990000000 - time_sub.tv_nsec));
     }
 
     printf("\n");
