@@ -32,6 +32,25 @@ void clock_gettime_diff(
     diff->tv_nsec = time_end->tv_nsec - time_beg->tv_nsec;
 }
 
+void clock_gettime_diff_add(
+    const struct timespec *time_beg,
+    const struct timespec *time_end,
+    struct timespec *diff)
+{
+    diff->tv_sec += time_end->tv_sec - time_beg->tv_sec;
+    diff->tv_nsec += time_end->tv_nsec - time_beg->tv_nsec;
+}
+
+uint64_t clock_getdiff_nsec(const struct timespec *a, const struct timespec *b)
+{
+    return (b->tv_sec - a->tv_sec) * (uint64_t)1000000000 + (b->tv_nsec - a->tv_nsec);
+}
+
+long double clock_getdiff_sec(const struct timespec *a, const struct timespec *b)
+{
+    return (b->tv_sec - a->tv_sec) + (b->tv_nsec - a->tv_nsec) / (long double)1000000000;
+}
+
 /***************************************************************************************************
   X11 platform
 
@@ -193,8 +212,19 @@ void egl_platform_run(struct egl_device *device)
 
     int d = 0;
     float i = 0.0;
+    float target_fps = 60.0;
 
-    struct timespec time_beg, time_end, time_diff, time_wait, time_sub;
+    struct timespec time_beg, time_cycle, time_sync;
+
+    // Measure clock overhead
+    int over_nsec = 0;
+    {
+        clock_gettime(CLOCK_MONOTONIC, &time_beg);
+        clock_gettime(CLOCK_MONOTONIC, &time_sync);
+        clock_gettime(CLOCK_MONOTONIC, &time_cycle);
+        over_nsec = (int)clock_getdiff_nsec(&time_beg, &time_cycle);
+    }
+
     clock_gettime(CLOCK_MONOTONIC, &time_beg);
 
     while (!done) {
@@ -219,18 +249,22 @@ void egl_platform_run(struct egl_device *device)
             }
         }
 
-        clock_gettime(CLOCK_MONOTONIC, &time_end);
-        clock_gettime_diff(&time_beg, &time_end, &time_diff);
-        time_beg = time_end;
-
-        fprintf(stdout, "%.3Lf fps         \r", 1 / (time_diff.tv_sec + time_diff.tv_nsec / (long double)1000000000));
-        fflush(stdout);
+        clock_gettime(CLOCK_MONOTONIC, &time_cycle);
 
         do {
-            clock_gettime(CLOCK_MONOTONIC, &time_wait);
-            clock_gettime_diff(&time_beg, &time_wait, &time_diff);
-            clock_gettime_diff(&time_end, &time_wait, &time_sub);
-        } while (time_diff.tv_sec * (uint64_t)1000000000 + time_diff.tv_nsec < 1 / 60.0 * ((uint64_t)990000000 - time_sub.tv_nsec));
+            clock_gettime(CLOCK_MONOTONIC, &time_sync);
+        } while (
+            clock_getdiff_nsec(&time_beg, &time_cycle) + clock_getdiff_nsec(&time_cycle, &time_sync) <
+            1 / target_fps * (uint64_t)1000000000);
+
+        fprintf(
+            stdout,
+            "%.3Lf fps         \r",
+            1 / ((clock_getdiff_nsec(&time_beg, &time_cycle) + clock_getdiff_nsec(&time_cycle, &time_sync) - 2 * over_nsec) / (long double)1000000000)
+        );
+        fflush(stdout);
+
+        time_beg = time_cycle;
     }
 
     printf("\n");
