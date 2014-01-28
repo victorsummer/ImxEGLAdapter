@@ -12,6 +12,9 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
+#define NSEC_PER_SEC        1000000000
+#define TIME_T_MAX          (time_t)((1UL << ((sizeof(time_t) << 3) - 1)) - 1)
+
 struct egl_device {
     EGLNativeDisplayType type;
     EGLDisplay display;
@@ -41,14 +44,67 @@ void clock_gettime_diff_add(
     diff->tv_nsec += time_end->tv_nsec - time_beg->tv_nsec;
 }
 
-uint64_t clock_getdiff_nsec(const struct timespec *a, const struct timespec *b)
+long double clock_getdiff_nsec(const struct timespec *a, const struct timespec *b)
 {
-    return (b->tv_sec - a->tv_sec) * (uint64_t)1000000000 + (b->tv_nsec - a->tv_nsec);
+    return (b->tv_sec - a->tv_sec) * 1000000000.0L + (b->tv_nsec - a->tv_nsec);
 }
 
 long double clock_getdiff_sec(const struct timespec *a, const struct timespec *b)
 {
-    return (b->tv_sec - a->tv_sec) + (b->tv_nsec - a->tv_nsec) / (long double)1000000000;
+    return (b->tv_sec - a->tv_sec) + (b->tv_nsec - a->tv_nsec) / 1000000000.0L;
+}
+
+/**
+ * set_normalized_timespec - set timespec sec and nsec parts and normalize
+ *
+ * @ts:         pointer to timespec variable to be set
+ * @sec:        seconds to set
+ * @nsec:       nanoseconds to set
+ *
+ * Set seconds and nanoseconds field of a timespec variable and
+ * normalize to the timespec storage format
+ *
+ * Note: The tv_nsec part is always in the range of
+ *      0 <= tv_nsec < NSEC_PER_SEC
+ * For negative values only the tv_sec field is negative !
+ */
+void set_normalized_timespec(struct timespec *ts, time_t sec, long long nsec)
+{
+    while (nsec >= NSEC_PER_SEC) {
+        /*
+         * The following asm() prevents the compiler from
+         * optimising this loop into a modulo operation. See
+         * also __iter_div_u64_rem() in include/linux/time.h
+         */
+        asm("" : "+rm"(nsec));
+        nsec -= NSEC_PER_SEC;
+        ++sec;
+    }
+    while (nsec < 0) {
+        asm("" : "+rm"(nsec));
+        nsec += NSEC_PER_SEC;
+        --sec;
+    }
+    ts->tv_sec = sec;
+    ts->tv_nsec = nsec;
+}
+
+/*
+ * Add two timespec values and do a safety check for overflow.
+ * It's assumed that both values are valid (>= 0)
+ */
+struct timespec timespec_add_safe(const struct timespec lhs,
+                                  const struct timespec rhs)
+{
+    struct timespec res;
+
+    set_normalized_timespec(&res, lhs.tv_sec + rhs.tv_sec,
+                            lhs.tv_nsec + rhs.tv_nsec);
+
+    if (res.tv_sec < lhs.tv_sec || res.tv_sec < rhs.tv_sec)
+        res.tv_sec = TIME_T_MAX;
+
+    return res;
 }
 
 /***************************************************************************************************
@@ -212,22 +268,19 @@ void egl_platform_run(struct egl_device *device)
 
     int d = 0;
     float i = 0.0;
-    float target_fps = 60.0;
+    int frame_count = 0;
 
-    struct timespec time_beg, time_cycle, time_sync;
+    struct timespec time_slice = { 0 }, time_start, time_target, time_sync, time_loop_b, time_loop_e = { 0 };
+    long elapsed = 0;
 
-    // Measure clock overhead
-    int over_nsec = 0;
-    {
-        clock_gettime(CLOCK_MONOTONIC, &time_beg);
-        clock_gettime(CLOCK_MONOTONIC, &time_sync);
-        clock_gettime(CLOCK_MONOTONIC, &time_cycle);
-        over_nsec = (int)clock_getdiff_nsec(&time_beg, &time_cycle);
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, &time_beg);
+    time_slice.tv_nsec = 1 / (24000 / 1001.0L) * 1000000000L;
+    clock_gettime(CLOCK_MONOTONIC, &time_start);
+    time_sync = time_target = time_start;
 
     while (!done) {
+        time_loop_b = time_loop_e;
+        clock_gettime(CLOCK_MONOTONIC, &time_loop_e);
+
         {
             glClearColor(i, i, i, 1);
             glClear(GL_COLOR_BUFFER_BIT);
@@ -249,22 +302,23 @@ void egl_platform_run(struct egl_device *device)
             }
         }
 
-        clock_gettime(CLOCK_MONOTONIC, &time_cycle);
+        ++frame_count;
 
-        do {
+        time_target = timespec_add_safe(time_target, time_slice);
+        while (time_sync.tv_sec * 1000000000 + time_sync.tv_nsec < time_target.tv_sec * 1000000000 + time_target.tv_nsec) {
             clock_gettime(CLOCK_MONOTONIC, &time_sync);
-        } while (
-            clock_getdiff_nsec(&time_beg, &time_cycle) + clock_getdiff_nsec(&time_cycle, &time_sync) <
-            1 / target_fps * (uint64_t)1000000000);
+            elapsed = (time_sync.tv_sec - time_start.tv_sec) * 1000000000.0L + (time_sync.tv_nsec - time_start.tv_nsec);
+        }
 
         fprintf(
             stdout,
-            "%.3Lf fps         \r",
-            1 / ((clock_getdiff_nsec(&time_beg, &time_cycle) + clock_getdiff_nsec(&time_cycle, &time_sync) - 2 * over_nsec) / (long double)1000000000)
+            "F: %d, E: %.3Lf, C: %.3Lf, A: %.3Lf       \r",
+            frame_count,
+            elapsed / 1000000000.0L,
+            1 / (time_loop_e.tv_sec - time_loop_b.tv_sec + (time_loop_e.tv_nsec - time_loop_b.tv_nsec) / 1000000000.0L),
+            frame_count / (elapsed / 1000000000.0L)
         );
         fflush(stdout);
-
-        time_beg = time_cycle;
     }
 
     printf("\n");
