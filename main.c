@@ -280,6 +280,7 @@ void egl_platform_run(struct egl_device *device)
     while (!done) {
         time_loop_b = time_loop_e;
         clock_gettime(CLOCK_MONOTONIC, &time_loop_e);
+        time_target = time_loop_e;
 
         {
             glClearColor(i, i, i, 1);
@@ -304,22 +305,27 @@ void egl_platform_run(struct egl_device *device)
 
         ++frame_count;
 
+        fprintf(
+            stdout,
+            "F: %d, E: %.3Lf, C: %.3Lf       \r",
+            frame_count,
+            elapsed / 1000000000.0L,
+            1 / (time_loop_e.tv_sec - time_loop_b.tv_sec + (time_loop_e.tv_nsec - time_loop_b.tv_nsec) / 1000000000.0L)
+        );
+        fflush(stdout);
+
         time_target = timespec_add_safe(time_target, time_slice);
         while (time_sync.tv_sec * 1000000000 + time_sync.tv_nsec < time_target.tv_sec * 1000000000 + time_target.tv_nsec) {
             clock_gettime(CLOCK_MONOTONIC, &time_sync);
             elapsed = (time_sync.tv_sec - time_start.tv_sec) * 1000000000.0L + (time_sync.tv_nsec - time_start.tv_nsec);
         }
-
-        fprintf(
-            stdout,
-            "F: %d, E: %.3Lf, C: %.3Lf, A: %.3Lf       \r",
-            frame_count,
-            elapsed / 1000000000.0L,
-            1 / (time_loop_e.tv_sec - time_loop_b.tv_sec + (time_loop_e.tv_nsec - time_loop_b.tv_nsec) / 1000000000.0L),
-            frame_count / (elapsed / 1000000000.0L)
-        );
-        fflush(stdout);
     }
+
+//    clock_gettime(CLOCK_MONOTONIC, &time_target);
+//    printf(
+//        "%.3Lf\n",
+//        frame_count / (time_target.tv_sec - time_start.tv_sec) + (time_target.tv_nsec - time_start.tv_nsec) / 1000000000.0L
+//    );
 
     printf("\n");
 
