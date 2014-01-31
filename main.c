@@ -24,9 +24,11 @@ struct egl_device {
     EGLContext context;
     const EGLint *attr_config;
     const EGLint *attr_context;
+	int width;
+	int height;
 };
 
-volatile sigatomic_t done = 0;
+volatile sig_atomic_t done = 0;
 
 void clock_gettime_diff(
     const struct timespec *time_beg,
@@ -143,14 +145,14 @@ struct timespec timespec_add_safe(const struct timespec lhs,
 int egl_platform_get_display_type(struct egl_device *device)
 {
     device->type = (EGLNativeDisplayType)fbGetDisplayByIndex(0);
-    fbGetDisplayGeometry(device->display_type, &device->width, &device->height);
+    fbGetDisplayGeometry(device->type, &device->width, &device->height);
 
     return 0;
 }
 
 int egl_platform_create_window(struct egl_device *device)
 {
-    device->window = (EGLNativeWindowType)fbCreateWindow(device->display_type, 0, 0, 0, 0);
+    device->window = (EGLNativeWindowType)fbCreateWindow(device->type, 0, 0, 0, 0);
 
     return 0;
 }
@@ -165,6 +167,35 @@ int egl_platform_destroy_window(struct egl_device *device)
 
 void egl_platform_run(struct egl_device *device)
 {
+	setenv("FB_MULTIBUFFER", "2", 0);
+
+	int d = 0;
+	float i = 0.0;
+	while (!done)
+	{
+ 		glClearColor(i, i, i, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        eglSwapBuffers(device->display, device->surface);
+
+        if (d)
+            i += 0.01;
+        else
+            i -= 0.01;
+
+        if (i > 1.0 || i < 0.0) {
+            if (i > 1.0)
+                i = 1.0;
+            if (i < 0.0)
+                i = 0.0;
+
+            d = !d;
+        }
+    }
+
+	char cmd_line[1024];
+	sprintf(cmd_line, "fbset -xres %d -yres %d", device->width, device->height);
+	system(cmd_line);
 }
 
 /**************************************************************************************************/
@@ -476,6 +507,7 @@ int egl_uninitialize(struct egl_device *device)
 
 void signal_handler(int signal)
 {
+	done = 1;
 }
 
 void egl_run(struct egl_device *device)
