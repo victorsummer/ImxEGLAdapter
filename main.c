@@ -333,7 +333,8 @@ static void *thread_start(void *arg)
                     // Redraw
                     break;
                 case ConfigureNotify:
-                    glViewport(0, 0, (GLint)event.xconfigure.width, (GLint)event.xconfigure.height);
+                    device->width = event.xconfigure.width;
+                    device->height = event.xconfigure.height;
                     break;
                 case KeyPress:
                     {
@@ -410,175 +411,173 @@ GLuint gl_link_program(GLuint vertex_shader, GLuint fragment_shader)
 
 void egl_platform_run(struct egl_device *device)
 {
+    static const GLchar *vertex_shader_source[] = {
+        "attribute vec4 v_position;         \n"
+        "attribute vec2 v_coordinates;      \n"
+        "varying vec2 coordinates;          \n"
+        "                                   \n"
+        "void main() {                      \n"
+        "   coordinates = v_coordinates;    \n"
+        "   gl_Position = v_position;       \n"
+        "}                                  \n"
+    };
+
+    // YUV to BGR conversion matrix (column major)
+    static const GLfloat matrix[] = {
+        //   B        G        R
+        1.000f,  1.000f,  1.000f, // Y
+        1.772f, -0.344f,  0.000f, // V
+        0.000f, -0.714f,  1.402f, // U
+    };
+
+    static const GLchar *fragment_shader_source[] = {
+        "precision mediump float;                                   \n"
+        "uniform sampler2D texture_y;                               \n"
+        "uniform sampler2D texture_u;                               \n"
+        "uniform sampler2D texture_v;                               \n"
+        "varying vec2 coordinates;                                  \n"
+        "uniform mat3 yuv_to_rgb;                                   \n"
+        "                                                           \n"
+        "void main() {                                              \n"
+        "   float y = texture2D(texture_y, coordinates).r;          \n"
+        "   float u = texture2D(texture_u, coordinates).r - 0.5;    \n"
+        "   float v = texture2D(texture_v, coordinates).r - 0.5;    \n"
+        "   vec3 rgb = yuv_to_rgb * vec3(y, u, v);                  \n"
+        "   gl_FragColor = vec4(rgb, 1.0);                          \n"
+        "}                                                          \n"
+    };
+
+    GLuint vertex_shader = gl_compile_shader(GL_VERTEX_SHADER, vertex_shader_source[0]);
+    assert(vertex_shader != -1);
+    GLuint fragment_shader = gl_compile_shader(GL_FRAGMENT_SHADER, fragment_shader_source[0]);
+    assert(fragment_shader != -1);
+    GLuint program = gl_link_program(vertex_shader, fragment_shader);
+    assert(program != -1);
+
+    // -1, 1 (0) | 1, 1 (1)
+    // ----------|---------
+    // -1,-1 (2) | 1,-1 (3)
+    GLfloat vertices[] = {
+        -1,  1,  1,  1,
+        -1, -1,  1, -1,
+    };
+
+    // 0, 0 (2) | 1, 0 (3)
+    // ---------|---------
+    // 0, 1 (0) | 1, 1 (1)
+    GLfloat coordinates[] = {
+        0, 0, 1, 0,
+        0, 1, 1, 1,
+    };
+
+    GLint v_position = glGetAttribLocation(program, "v_position");
+    glEnableVertexAttribArray(v_position);
+    glVertexAttribPointer(v_position, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+
+    GLint v_coordinates = glGetAttribLocation(program, "v_coordinates");
+    glEnableVertexAttribArray(v_coordinates);
+    glVertexAttribPointer(v_coordinates, 2, GL_FLOAT, GL_FALSE, 0, coordinates);
+
     {
-        static const GLchar *vertex_shader_source[] = {
-            "attribute vec4 v_position;         \n"
-            "attribute vec2 v_coordinates;      \n"
-            "varying vec2 coordinates;          \n"
-            "                                   \n"
-            "void main() {                      \n"
-            "   coordinates = v_coordinates;    \n"
-            "   gl_Position = v_position;       \n"
-            "}                                  \n"
+        int w = 1920, h = 1080; // frame.yuv dimensions
+        int y = w * h;
+        int v = y / 4;
+        int u = v;
+
+        FILE *fp = fopen("frame.yuv", "rb");
+
+        fseek(fp, 0, SEEK_END);
+        int file_size = ftell(fp);
+
+        int frame_size = y + u + v;
+        int frame_count = file_size / frame_size;
+
+        printf("file_size = %d, frame_size = %d, frame_count = %d\n", file_size, frame_size, frame_count);
+
+        GLvoid *planes[] = {
+            (GLvoid *)malloc(y),
+            (GLvoid *)malloc(u),
+            (GLvoid *)malloc(v)
         };
 
-        // YUV to BGR conversion matrix (column major)
-        static const GLfloat matrix[] = {
-            //   B        G        R
-            1.000f,  1.000f,  1.000f, // Y
-            1.772f, -0.344f,  0.000f, // V
-            0.000f, -0.714f,  1.402f, // U
-        };
+        fseek(fp, file_size % frame_size, SEEK_SET);
+        fread(planes[0], y, 1, fp);
+        fread(planes[2], v, 1, fp);
+        fread(planes[1], u, 1, fp);
 
-        static const GLchar *fragment_shader_source[] = {
-            "precision mediump float;                                   \n"
-            "uniform sampler2D texture_y;                               \n"
-            "uniform sampler2D texture_u;                               \n"
-            "uniform sampler2D texture_v;                               \n"
-            "varying vec2 coordinates;                                  \n"
-            "uniform mat3 yuv_to_rgb;                                   \n"
-            "                                                           \n"
-            "void main() {                                              \n"
-            "   float y = texture2D(texture_y, coordinates).r;          \n"
-            "   float u = texture2D(texture_u, coordinates).r - 0.5;    \n"
-            "   float v = texture2D(texture_v, coordinates).r - 0.5;    \n"
-            "   vec3 rgb = yuv_to_rgb * vec3(y, u, v);                  \n"
-            "   gl_FragColor = vec4(rgb, 1.0);                          \n"
-            "}                                                          \n"
-        };
+        fclose(fp);
 
-        GLuint vertex_shader = gl_compile_shader(GL_VERTEX_SHADER, vertex_shader_source[0]);
-        assert(vertex_shader != -1);
-        GLuint fragment_shader = gl_compile_shader(GL_FRAGMENT_SHADER, fragment_shader_source[0]);
-        assert(fragment_shader != -1);
-        GLuint program = gl_link_program(vertex_shader, fragment_shader);
-        assert(program != -1);
+        glUniformMatrix3fv(
+            glGetUniformLocation(program, "yuv_to_rgb"),
+            1,
+            GL_FALSE,
+            matrix);
 
-        // -1, 1 (0) | 1, 1 (1)
-        // ----------|---------
-        // -1,-1 (2) | 1,-1 (3)
-        GLfloat vertices[] = {
-            -1,  1,  1,  1,
-            -1, -1,  1, -1,
-        };
+        GLuint textures[3];
+        glGenTextures(3, textures);
 
-        // 0, 0 (2) | 1, 0 (3)
-        // ---------|---------
-        // 0, 1 (0) | 1, 1 (1)
-        GLfloat coordinates[] = {
-            0, 0, 1, 0,
-            0, 1, 1, 1,
-        };
+        // Y
+        GLint texture_y = glGetUniformLocation(program, "texture_y");
+        glUniform1i(texture_y, 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture_y);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_LUMINANCE,
+            w,
+            h,
+            0,
+            GL_LUMINANCE,
+            GL_UNSIGNED_BYTE,
+            (GLvoid *)planes[0]);
 
-        GLint v_position = glGetAttribLocation(program, "v_position");
-        glEnableVertexAttribArray(v_position);
-        glVertexAttribPointer(v_position, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+        // U
+        GLint texture_u = glGetUniformLocation(program, "texture_u");
+        glUniform1i(texture_u, 1);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, texture_u);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_LUMINANCE,
+            w / 2,
+            h / 2,
+            0,
+            GL_LUMINANCE,
+            GL_UNSIGNED_BYTE,
+            (GLvoid *)planes[1]);
 
-        GLint v_coordinates = glGetAttribLocation(program, "v_coordinates");
-        glEnableVertexAttribArray(v_coordinates);
-        glVertexAttribPointer(v_coordinates, 2, GL_FLOAT, GL_FALSE, 0, coordinates);
+        // V
+        GLint texture_v = glGetUniformLocation(program, "texture_v");
+        glUniform1i(texture_v, 2);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, texture_v);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_LUMINANCE,
+            w / 2,
+            h / 2,
+            0,
+            GL_LUMINANCE,
+            GL_UNSIGNED_BYTE,
+            (GLvoid *)planes[2]);
 
-        {
-            int w = 1920, h = 1080; // frame.yuv dimensions
-            int y = w * h;
-            int v = y / 4;
-            int u = v;
-
-            FILE *fp = fopen("frame.yuv", "rb");
-
-            fseek(fp, 0, SEEK_END);
-            int file_size = ftell(fp);
-
-            int frame_size = y + u + v;
-            int frame_count = file_size / frame_size;
-
-            printf("file_size = %d, frame_size = %d, frame_count = %d\n", file_size, frame_size, frame_count);
-
-            GLvoid *planes[] = {
-                (GLvoid *)malloc(y),
-                (GLvoid *)malloc(u),
-                (GLvoid *)malloc(v)
-            };
-
-            fseek(fp, file_size % frame_size, SEEK_SET);
-            fread(planes[0], y, 1, fp);
-            fread(planes[2], v, 1, fp);
-            fread(planes[1], u, 1, fp);
-
-            fclose(fp);
-
-            glUniformMatrix3fv(
-                glGetUniformLocation(program, "yuv_to_rgb"),
-                1,
-                GL_FALSE,
-                matrix);
-
-            GLuint textures[3];
-            glGenTextures(3, textures);
-
-            // Y
-            GLint texture_y = glGetUniformLocation(program, "texture_y");
-            glUniform1i(texture_y, 0);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, texture_y);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_LUMINANCE,
-                w,
-                h,
-                0,
-                GL_LUMINANCE,
-                GL_UNSIGNED_BYTE,
-                (GLvoid *)planes[0]);
-
-            // U
-            GLint texture_u = glGetUniformLocation(program, "texture_u");
-            glUniform1i(texture_u, 1);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, texture_u);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_LUMINANCE,
-                w / 2,
-                h / 2,
-                0,
-                GL_LUMINANCE,
-                GL_UNSIGNED_BYTE,
-                (GLvoid *)planes[1]);
-
-            // V
-            GLint texture_v = glGetUniformLocation(program, "texture_v");
-            glUniform1i(texture_v, 2);
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, texture_v);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_LUMINANCE,
-                w / 2,
-                h / 2,
-                0,
-                GL_LUMINANCE,
-                GL_UNSIGNED_BYTE,
-                (GLvoid *)planes[2]);
-
-            free(planes[2]);
-            free(planes[1]);
-            free(planes[0]);
-        }
-
-        glViewport(0, 0, device->width, device->height);
-
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        free(planes[2]);
+        free(planes[1]);
+        free(planes[0]);
     }
+
+    glViewport(0, 0, device->width, device->height);
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     system("setterm -cursor off");
 
@@ -602,8 +601,11 @@ void egl_platform_run(struct egl_device *device)
         time_target = time_loop_e;
 
         {
-//            glClearColor(i, i, i, 1);
-//            glClear(GL_COLOR_BUFFER_BIT);
+            glViewport(0, 0, device->width, device->height);
+
+            glEnableVertexAttribArray(v_position);
+            glEnableVertexAttribArray(v_coordinates);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
             eglSwapBuffers(device->display, device->surface);
 
