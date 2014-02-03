@@ -323,6 +323,27 @@ int egl_platform_destroy_window(struct egl_device *device)
     return 0;
 }
 
+GLfloat vertices[8];
+
+int calculate_vertices(double vw, double vh, GLfloat *vertices)
+{
+    double width = 1920;
+    double height = 1080;
+
+    double w = 2, h = 2, wr = width / vw, hr = height / vh;
+    if (wr > hr)
+        h = height / wr / vh * 2.0;
+    else
+        w = width / hr / vw * 2.0;
+
+    vertices[0] = vertices[4] = w / -2.0;
+    vertices[1] = vertices[3] = h / 2.0;
+    vertices[2] = vertices[6] = w / 2.0;
+    vertices[5] = vertices[7] = h / -2.0;
+
+    return 0;
+}
+
 static void *thread_start(void *arg)
 {
     struct egl_device *device = (struct egl_device *)arg;
@@ -351,6 +372,7 @@ static void *thread_start(void *arg)
                 case ConfigureNotify:
                     device->width = event.xconfigure.width;
                     device->height = event.xconfigure.height;
+                    calculate_vertices(device->width, device->height, &vertices[0]);
                     break;
                 case KeyPress:
                     {
@@ -377,18 +399,22 @@ void egl_platform_run(struct egl_device *device)
     pthread_create(&thread, 0, &thread_start, (void *)device);
 
     static const GLchar vertex_shader_src[] =
-        "attribute vec4 position;       "
+        "attribute vec4 a_position;     "
+        "attribute vec3 a_color;        "
+        "varying vec3 v_color;          "
         "                               "
         "void main() {                  "
-        "   gl_Position = position;     "
+        "   gl_Position = a_position;   "
+        "   v_color = a_color;          "
         "}                              ";
 
     static const GLchar fragment_shader_src[] =
-        "precision mediump float;                       "
-        "                                               "
-        "void main() {                                  "
-        "   gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);    "
-        "}                                              ";
+        "precision mediump float;                   "
+        "varying vec3 v_color;                      "
+        "                                           "
+        "void main() {                              "
+        "   gl_FragColor = vec4(v_color, 1.0);      "
+        "}                                          ";
 
     GLuint vertex_shader = gl_load_shader(GL_VERTEX_SHADER, vertex_shader_src);
     assert(vertex_shader != -1);
@@ -405,30 +431,42 @@ void egl_platform_run(struct egl_device *device)
     glGetProgramiv(program, GL_LINK_STATUS, &linked);
     assert(linked);
 
-    GLfloat vertices[] = {
-         0.0,  0.5,  0.0,
-        -0.5, -0.5,  0.0,
-         0.5, -0.5,  0.0,
+//    GLfloat vertices[] = {
+//        -0.5,  0.5,  0.5,  0.5,
+//        -0.5, -0.5,  0.5, -0.5,
+//    };
+
+    GLfloat colors[] = {
+        1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
     };
 
-    glViewport(0, 0, device->width, device->height);
+    glUseProgram(program);
+
+    GLint position = glGetAttribLocation(program, "a_position");
+    glVertexAttribPointer(position, 2, GL_FLOAT, GL_FALSE, 0, &vertices[0]);
+    glEnableVertexAttribArray(position);
+
+    GLint color = glGetAttribLocation(program, "a_color");
+    glVertexAttribPointer(color, 3, GL_FLOAT, GL_FALSE, 0, &colors[0]);
+    glEnableVertexAttribArray(color);
 
     glClearColor(0.0, 0.0, 0.0, 1.0);
-    glClear(GL_COLOR_BUFFER_BIT);
 
-    glUseProgram(program);
-    glBindAttribLocation(program, 0, "position");
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, vertices);
-    glEnableVertexAttribArray(0);
-
-    while (!done) {
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        eglSwapBuffers(device->display, device->surface);
-
-        usleep(50000);
-    }
+    eglSwapInterval(device->display, 1);
 
     printf("Press <ESC> to quit.\n");
+
+    while (!done) {
+        glViewport(0, 0, device->width, device->height);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glVertexAttribPointer(position, 2, GL_FLOAT, GL_FALSE, 0, &vertices[0]);
+
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        eglSwapBuffers(device->display, device->surface);
+    }
 
     pthread_join(thread, 0);
 }
