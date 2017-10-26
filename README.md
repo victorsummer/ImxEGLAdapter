@@ -1,3 +1,1 @@
-project-12
-==========
-Platform independent EGL.
+EGL Adapter for Imx platform
